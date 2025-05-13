@@ -1,5 +1,5 @@
 // src/collections/Templates.ts
-import { CollectionConfig } from 'payload/types'
+import { CollectionConfig } from 'payload'
 
 const Templates: CollectionConfig = {
   slug: 'templates',

@@ -1,9 +1,8 @@
 import { Octokit } from '@octokit/rest';
-import { createClient } from '@vercel/client';
 import fs from 'fs/promises';
 import path from 'path';
 import payload from 'payload';
-import { Template, ClientPreview } from '../payload-types';
+import type { Template, ClientPreview } from '../payload-types';
 
 interface TemplatePreviewOptions {
   clientName: string;
@@ -19,26 +18,23 @@ interface DeploymentOptions {
 
 export class TemplateService {
   private octokit: Octokit;
-  private vercel: ReturnType<typeof createClient>;
+  private vercelToken: string;
 
   constructor() {
     this.octokit = new Octokit({
       auth: process.env.GITHUB_TOKEN,
     });
-
-    this.vercel = createClient({
-      token: process.env.VERCEL_TOKEN,
-    });
+    this.vercelToken = process.env.VERCEL_TOKEN || '';
   }
 
   async generatePreview(options: TemplatePreviewOptions): Promise<string> {
     const { clientName, templateId, customizations } = options;
     
     // 1. Get template data from Payload
-    const template = await payload.findByID<Template>({
+    const template = await payload.findByID({
       collection: 'templates',
       id: templateId,
-    });
+    }) as Template;
 
     if (!template) {
       throw new Error('Template not found');
@@ -49,17 +45,19 @@ export class TemplateService {
     await fs.mkdir(previewDir, { recursive: true });
 
     // 3. Copy and customize template files
-    for (const file of template.templateFiles) {
-      const filePath = path.join(previewDir, file.path);
-      await fs.mkdir(path.dirname(filePath), { recursive: true });
-      
-      // Apply customizations to the file content
-      let content = file.content;
-      for (const [key, value] of Object.entries(customizations)) {
-        content = content.replace(new RegExp(`{{${key}}}`, 'g'), value.toString());
+    if (template.templateFiles) {
+      for (const file of template.templateFiles) {
+        const filePath = path.join(previewDir, file.path);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        
+        // Apply customizations to the file content
+        let content = file.content;
+        for (const [key, value] of Object.entries(customizations)) {
+          content = content.replace(new RegExp(`{{${key}}}`, 'g'), value.toString());
+        }
+        
+        await fs.writeFile(filePath, content);
       }
-      
-      await fs.writeFile(filePath, content);
     }
 
     return previewDir;
@@ -69,10 +67,10 @@ export class TemplateService {
     const { clientName, previewId } = options;
     
     // 1. Get preview data
-    const preview = await payload.findByID<ClientPreview>({
+    const preview = await payload.findByID({
       collection: 'client-previews',
       id: previewId,
-    });
+    }) as ClientPreview;
 
     if (!preview) {
       throw new Error('Preview not found');
@@ -97,29 +95,49 @@ export class TemplateService {
     const { clientName, previewId, customDomain } = options;
 
     // 1. Get GitHub repo URL
-    const preview = await payload.findByID<ClientPreview>({
+    const preview = await payload.findByID({
       collection: 'client-previews',
       id: previewId,
-    });
+    }) as ClientPreview;
 
     if (!preview?.githubRepo) {
       throw new Error('GitHub repository not found');
     }
 
-    // 2. Deploy to Vercel
-    const deployment = await this.vercel.deployments.create({
-      name: `client-${clientName}`,
-      gitSource: {
-        type: 'github',
-        repo: preview.githubRepo,
+    // 2. Deploy to Vercel using REST API
+    const response = await fetch('https://api.vercel.com/v13/deployments', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.vercelToken}`,
+        'Content-Type': 'application/json',
       },
+      body: JSON.stringify({
+        name: `client-${clientName}`,
+        gitSource: {
+          type: 'github',
+          repo: preview.githubRepo,
+        },
+      }),
     });
+
+    if (!response.ok) {
+      throw new Error('Failed to deploy to Vercel');
+    }
+
+    const deployment = await response.json();
 
     // 3. Configure custom domain if provided
     if (customDomain) {
-      await this.vercel.domains.create({
-        name: customDomain,
-        projectId: deployment.id,
+      await fetch('https://api.vercel.com/v9/domains', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.vercelToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: customDomain,
+          project: deployment.id,
+        }),
       });
     }
 
